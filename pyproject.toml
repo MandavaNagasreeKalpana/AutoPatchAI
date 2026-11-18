@@ -5,6 +5,7 @@ description = "AST-aware multi-agent framework for automated security vulnerabil
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "pydantic>=2.7,<3",
     "python-dotenv>=1.0.1,<2",
 ]
 

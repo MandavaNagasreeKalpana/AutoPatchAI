@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "name": "autopatch-seed-benchmark",
+  "description": "Small hand-written seed set of intentionally vulnerable Python snippets used as test fixtures during AutoPatch AI development. Not a comprehensive or real-world dataset. Expected Bandit rule IDs are the authors' expectations and are confirmed against Bandit in M2.",
+  "samples": [
+    {
+      "sample_id": "sqli-001",
+      "category": "sql_injection",
+      "description": "SELECT query built with an f-string from a username argument, then passed to cursor.execute.",
+      "vulnerable_file": "samples/sql_injection/sqli_001/app.py",
+      "expected_vulnerability": "sql_injection",
+      "expected_cwe": "CWE-89",
+      "expected_rule_ids": ["B608"],
+      "expected_lines": [10]
+    },
+    {
+      "sample_id": "sqli-002",
+      "category": "sql_injection",
+      "description": "DELETE statement built with %-formatting directly inside conn.execute.",
+      "vulnerable_file": "samples/sql_injection/sqli_002/app.py",
+      "expected_vulnerability": "sql_injection",
+      "expected_cwe": "CWE-89",
+      "expected_rule_ids": ["B608"],
+      "expected_lines": [9]
+    },
+    {
+      "sample_id": "sqli-003",
+      "category": "sql_injection",
+      "description": "SELECT built with str.format, including a user-chosen ORDER BY column that needs an allow-list rather than a bound parameter.",
+      "vulnerable_file": "samples/sql_injection/sqli_003/app.py",
+      "expected_vulnerability": "sql_injection",
+      "expected_cwe": "CWE-89",
+      "expected_rule_ids": ["B608"],
+      "expected_lines": [11]
+    },
+    {
+      "sample_id": "creds-001",
+      "category": "hardcoded_credentials",
+      "description": "SMTP password stored in a module-level constant and used for login.",
+      "vulnerable_file": "samples/hardcoded_credentials/creds_001/app.py",
+      "expected_vulnerability": "hardcoded_credentials",
+      "expected_cwe": "CWE-798",
+      "expected_rule_ids": ["B105"],
+      "expected_lines": [9]
+    },
+    {
+      "sample_id": "creds-002",
+      "category": "hardcoded_credentials",
+      "description": "API token passed as a hardcoded keyword argument when building a client.",
+      "vulnerable_file": "samples/hardcoded_credentials/creds_002/app.py",
+      "expected_vulnerability": "hardcoded_credentials",
+      "expected_cwe": "CWE-798",
+      "expected_rule_ids": ["B106"],
+      "expected_lines": [15]
+    },
+    {
+      "sample_id": "creds-003",
+      "category": "hardcoded_credentials",
+      "description": "Admin password used as a hardcoded default argument value.",
+      "vulnerable_file": "samples/hardcoded_credentials/creds_003/app.py",
+      "expected_vulnerability": "hardcoded_credentials",
+      "expected_cwe": "CWE-259",
+      "expected_rule_ids": ["B107"],
+      "expected_lines": [6]
+    },
+    {
+      "sample_id": "deser-001",
+      "category": "insecure_deserialization",
+      "description": "Client-supplied cookie is base64-decoded and passed to pickle.loads.",
+      "vulnerable_file": "samples/insecure_deserialization/deser_001/app.py",
+      "expected_vulnerability": "insecure_deserialization",
+      "expected_cwe": "CWE-502",
+      "expected_rule_ids": ["B301"],
+      "expected_lines": [11]
+    },
+    {
+      "sample_id": "deser-002",
+      "category": "insecure_deserialization",
+      "description": "Untrusted YAML text parsed with yaml.load and the full yaml.Loader.",
+      "vulnerable_file": "samples/insecure_deserialization/deser_002/app.py",
+      "expected_vulnerability": "insecure_deserialization",
+      "expected_cwe": "CWE-502",
+      "expected_rule_ids": ["B506"],
+      "expected_lines": [9]
+    },
+    {
+      "sample_id": "deser-003",
+      "category": "insecure_deserialization",
+      "description": "Bytes read from a caller-controlled file path are passed to marshal.loads.",
+      "vulnerable_file": "samples/insecure_deserialization/deser_003/app.py",
+      "expected_vulnerability": "insecure_deserialization",
+      "expected_cwe": "CWE-502",
+      "expected_rule_ids": ["B302"],
+      "expected_lines": [11]
+    }
+  ]
+}

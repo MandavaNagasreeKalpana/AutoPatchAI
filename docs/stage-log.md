@@ -33,3 +33,33 @@ A record of each development stage: what was built, how it was verified, and wha
 **Open items**
 - The Docker engine was not running on the development machine. It is needed from M4.
 - No GitHub remote yet. Pushing waits for approval.
+
+## M1 (2026-11-18): Core data models and benchmark foundation
+
+**Goal:** shared, validated data models for all four agents, plus a small benchmark of vulnerable fixtures. No agents and no Groq calls.
+
+**Dependency added:** `pydantic>=2.7,<3`. It resolved to 2.14.3 (pydantic-core 2.50.4) on Python 3.11.9, installed only in the project `.venv`.
+
+**Built**
+- `autopatch/models/`:
+  - `enums.py`: case-insensitive string enums. A test fails if a category is added without its entry in `CATEGORY_INFO`.
+  - `common.py`: checked types for project paths, identifiers, confidence, line numbers and timezone-aware datetimes, plus a frozen, extra-forbid base model.
+  - `finding.py`, `patch.py`, `verification.py`, `report.py`: the four main models.
+  - `benchmark.py`: the manifest schema.
+- Validation highlights:
+  - Path traversal and absolute paths are rejected, including inside diff headers.
+  - A patch must actually change the code.
+  - Overall verification status is worked out from the checks and must agree with them.
+  - The report checks links between findings, patches and verifications.
+- `autopatch/benchmark.py`: loads and validates the manifest, and checks sample files by reading them as text and parsing with `ast.parse`. Nothing is imported or executed.
+- `benchmarks/`: 9 intentionally vulnerable samples (sqli-001..003, creds-001..003, deser-001..003), `manifest.json` and a README. All credentials are fake (`fake-benchmark-*`).
+- 155 new unit tests in 6 files, plus shared factories in `tests/unit/conftest.py`.
+
+**Verified**
+- `uv run pytest`: 199 passed. That is the 44 original M0 config tests plus 155 new ones.
+- One test runs a sample whose code would write a marker file if executed, and confirms the file is never created.
+
+**Open items**
+- The expected Bandit rule IDs and lines in `manifest.json` have not yet been checked against Bandit. M2 does this.
+- The benchmark has no safe ("negative") samples yet, so false positives can't be measured. Planned for M7.
+- Patches currently record the replaced code (`original_code`) but not its line span. The span comes from the finding's `AstContext`. M3 may add an explicit span if applying patches needs it.
