@@ -59,11 +59,15 @@ The schema is defined in `autopatch/models/benchmark.py`, and
 
 ## Notes
 
-- **Expected rule IDs and lines have not yet been checked against Bandit.**
-  They are the authors' expectations, and the Scanner Agent milestone (M2) will
-  confirm or correct them.
-- Bandit may also report import-level warnings, such as B403 for `import pickle`.
-  These are not listed as expected findings.
+- **Expectations confirmed in M2 (Bandit 1.9.4).** All 9 samples were detected
+  with the expected rule ID at the expected line, so no manifest changes were
+  needed.
+  - Bandit reports B107 (creds-003) with the line range 6–7 because it covers the
+    function definition. The finding starts at the expected line 6.
+  - Bandit rates B608 confidence LOW for the f-string (sqli-001) and
+    `str.format` (sqli-003) samples, and MEDIUM for the `%` sample (sqli-002).
+- Bandit also reports B403 (`import pickle`) at deser-001 line 6. AutoPatch lists
+  it as a *related* finding, separate from the expected findings.
 - **How samples are checked:** tests only read the files as text and parse them
   with `ast.parse`, which builds a syntax tree without running anything. Each
   file contains only imports, constants and class/function definitions. No

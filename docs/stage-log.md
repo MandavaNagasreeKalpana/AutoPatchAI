@@ -63,3 +63,36 @@ A record of each development stage: what was built, how it was verified, and wha
 - The expected Bandit rule IDs and lines in `manifest.json` have not yet been checked against Bandit. M2 does this.
 - The benchmark has no safe ("negative") samples yet, so false positives can't be measured. Planned for M7.
 - Patches currently record the replaced code (`original_code`) but not its line span. The span comes from the finding's `AstContext`. M3 may add an explicit span if applying patches needs it.
+
+## M2 (2026-11-18): Scanner Agent
+
+**Goal:** turn Bandit + AST analysis into validated M1 `Finding` objects, safely and read-only. No patching, Groq, API or UI.
+
+**Dependency added:** `bandit>=1.8,<2`, locked at 1.9.4, which brings in PyYAML, stevedore and rich. It is installed only in `.venv`.
+
+**Built**
+- `autopatch/scanner/`:
+  - `file_discovery.py`: recursive `*.py` discovery with default generated-directory exclusions and glob `--exclude` patterns. It never follows symlinked directories, skips symlinked files, and refuses anything that resolves outside the root (including Windows junctions).
+  - `bandit_runner.py`: runs Bandit in-process through `BanditManager` on exactly the discovered files, with no subprocess and no Bandit file discovery. Every result is validated (`parse_issue`), and malformed results are collected instead of crashing. A missing Bandit raises `BanditNotInstalledError`. Bandit crashes are wrapped with secret-redacted messages.
+  - `rule_mapping.py`: the single rule→category table, plus the related rule B403, the excluded rules with reasons, confidence scores and category explanations.
+  - `ast_context.py`: decodes source per PEP 263 and parses it with `ast.parse` only. It finds the innermost function or class of at most 150 lines (otherwise the innermost statement), qualified names, decorators, imports and bounded snippets, and handles syntax errors and NUL bytes. It also redacts string literals for credential findings.
+  - `scanner.py`: `ScannerAgent` builds `Finding`s with deterministic IDs, puts B403 in `related_findings` and other rules in `ignored_issues`, and rejects results for files that weren't selected.
+- `autopatch/models/scan.py`: `ScanResult`, `IgnoredIssue`, `SkippedFile`.
+- `autopatch/benchmark.py`: `compare_scan_to_manifest()` gives per-sample detection outcomes.
+- `autopatch/cli.py` + `[project.scripts]`: `autopatch scan <dir> [-o file.json] [-e GLOB] [--ignore-nosec] [--fail-on-findings]`. Exit codes: 0 completed, 1 findings with `--fail-on-findings`, 2 operational error.
+
+**Decision: B303–B306 are not mapped.** The M2 spec listed them under insecure deserialization. In Bandit 1.9.4 they are `md5`, `ciphers`, `cipher_modes` and `mktemp_q`, so mapping them would misclassify unrelated findings. `test_b303_to_b306_are_not_deserialization` records this against the installed Bandit. B614 (`pytorch_load`) is a real deserialization rule in Bandit 1.9.4 and is a candidate to add later with approval.
+
+**Benchmark validation (real Bandit 1.9.4)**
+- All 9 samples were detected with the expected rule and line, with no unexpected supported findings and no unsupported rules firing.
+- B403 was reported as related for deser-001 line 6.
+- No manifest expectations changed. Only the manifest's description sentence was updated to say the expectations are confirmed.
+
+**Verified**
+- `uv run pytest`: 341 passed, 3 skipped. The 3 skips are real-symlink tests that need privileges this Windows account lacks. Junction and mocked tests cover the same protection.
+- Read-only: benchmark file hashes and mtimes were unchanged after the scan, and the scan opened no file in a write mode. No `__pycache__` appeared, no sample was imported, and a file with marker-writing top-level code was scanned without running.
+- No `fake-benchmark-*` credential appears in any scan output.
+
+**Open items**
+- `AstContext.source` is redacted for credential findings, so M3 must read the original span from disk to build `Patch.original_code`.
+- There is no data-flow analysis, and Bandit's credential name patterns miss names like `api_key`.

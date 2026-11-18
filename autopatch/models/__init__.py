@@ -12,6 +12,7 @@ from .enums import (
 from .finding import AstContext, Finding
 from .patch import Patch
 from .report import RemediationReport
+from .scan import IgnoredIssue, ScanResult, SkippedFile
 from .verification import (
     CheckResult,
     RescanResult,
@@ -26,11 +27,14 @@ __all__ = [
     "BenchmarkSample",
     "CheckResult",
     "Finding",
+    "IgnoredIssue",
     "Patch",
     "PatchStatus",
     "RemediationReport",
     "RescanResult",
+    "ScanResult",
     "Severity",
+    "SkippedFile",
     "VerificationResult",
     "VerificationStatus",
     "VulnerabilityCategory",

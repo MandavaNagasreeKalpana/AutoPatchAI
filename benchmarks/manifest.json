@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "name": "autopatch-seed-benchmark",
-  "description": "Small hand-written seed set of intentionally vulnerable Python snippets used as test fixtures during AutoPatch AI development. Not a comprehensive or real-world dataset. Expected Bandit rule IDs are the authors' expectations and are confirmed against Bandit in M2.",
+  "description": "Small hand-written seed set of intentionally vulnerable Python snippets used as test fixtures during AutoPatch AI development. Not a comprehensive or real-world dataset. Expected Bandit rule IDs and lines were confirmed against Bandit 1.9.4 in M2.",
   "samples": [
     {
       "sample_id": "sqli-001",

@@ -5,9 +5,13 @@ description = "AST-aware multi-agent framework for automated security vulnerabil
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "bandit>=1.8,<2",
     "pydantic>=2.7,<3",
     "python-dotenv>=1.0.1,<2",
 ]
+
+[project.scripts]
+autopatch = "autopatch.cli:main"
 
 [dependency-groups]
 dev = [
@@ -24,3 +28,7 @@ packages = ["autopatch"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
+filterwarnings = [
+    # Emitted by stevedore when Bandit loads its plugins; not from our code.
+    "ignore:The verify_requirements argument is now a no-op",
+]

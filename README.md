@@ -2,10 +2,11 @@
 
 **An AST-aware multi-agent framework for automated security vulnerability remediation in Python projects.**
 
-> **Status: early development (Milestone M1 complete).**
-> The configuration module, the shared data models and a small seed benchmark
-> exist so far. None of the agents, the orchestrator, the API or the UI are
-> implemented yet. See [Development status](#development-status).
+> **Status: early development (Milestone M2 complete).**
+> Implemented so far: configuration, shared data models, a small seed benchmark,
+> and the **Scanner Agent** with its `autopatch scan` CLI. The Patch Generator,
+> Verification and Documentation agents, the orchestrator, the API and the UI
+> are not implemented yet. See [Development status](#development-status).
 
 ## Overview
 
@@ -38,7 +39,7 @@ Streamlit UI ──HTTP──> FastAPI ──> Orchestrator
 
 | Agent | Responsibility | Status |
 |---|---|---|
-| Scanner | Run Bandit, map findings to categories, extract AST context | Not implemented |
+| Scanner | Run Bandit, map findings to categories, extract AST context | **Implemented (M2)** |
 | Patch Generator | Build prompts, call Groq, validate the returned patch | Not implemented |
 | Verification | Syntax check, sandboxed tests, Bandit rescan | Not implemented |
 | Documentation | Explain the vulnerability, the patch and verification results | Not implemented |
@@ -53,7 +54,7 @@ Streamlit UI ──HTTP──> FastAPI ──> Orchestrator
 | Configuration | python-dotenv | Yes |
 | Data models / validation | Pydantic v2 | Yes |
 | Tests | pytest | Yes |
-| Static security analysis | Bandit | Planned (M2) |
+| Static security analysis | Bandit (Python API) | Yes |
 | LLM | Groq API | Planned (M3) |
 | Isolated verification | Docker | Planned (M4) |
 | Backend API | FastAPI | Planned (M6) |
@@ -71,8 +72,8 @@ uv sync
 ```
 
 `uv sync` creates a project-local virtual environment in `.venv/` and installs the
-exact versions recorded in `uv.lock` (runtime plus the `dev` group). Nothing is
-installed into your global Python.
+exact versions recorded in `uv.lock` (runtime plus the `dev` group), including
+Bandit and the `autopatch` command. Nothing is installed into your global Python.
 
 ## Configuration
 
@@ -117,6 +118,7 @@ runs code.
 | `verification.py` | `VerificationResult`, `CheckResult`, `RescanResult` | Results of the syntax check, unit tests and security rescan, plus an overall status |
 | `report.py` | `RemediationReport` | Findings, patches and verifications for one project, with links between them checked |
 | `benchmark.py` | `BenchmarkManifest`, `BenchmarkSample` | Schema for `benchmarks/manifest.json` |
+| `scan.py` | `ScanResult`, `IgnoredIssue`, `SkippedFile` | Output of one Scanner Agent run (M2) |
 
 Validation rules:
 - **Project paths** must be relative to the project. Absolute paths (POSIX or
@@ -143,6 +145,110 @@ Validation rules:
   - verifications that point to an unknown patch
   - patches marked `verified` without a passed verification
 
+## Scanner Agent
+
+```
+autopatch/scanner/
+├─ file_discovery.py  find *.py files inside the root (skip generated dirs, exclusions, links leaving the root)
+├─ bandit_runner.py   run Bandit in-process via its Python API; validate every result
+├─ rule_mapping.py    the ONLY place Bandit rule IDs are mapped to categories
+├─ ast_context.py     ast.parse -> enclosing function/class span, imports, snippet, literal redaction
+├─ scanner.py         ScannerAgent: discovery -> Bandit -> classify -> Finding models -> ScanResult
+└─ errors.py          ScannerError types + secret redaction for error messages
+```
+
+`ScannerAgent().scan(path)` returns a `ScanResult` (`autopatch/models/scan.py`).
+The result holds `findings` (validated M1 `Finding` objects), `related_findings`,
+`ignored_issues`, `skipped_files` and `errors`.
+
+### Supported categories and rules
+
+| Category | Bandit rules (Bandit check name) |
+|---|---|
+| SQL Injection | B608 `hardcoded_sql_expressions` |
+| Hardcoded Credentials | B105 `hardcoded_password_string`, B106 `hardcoded_password_funcarg`, B107 `hardcoded_password_default` |
+| Insecure Deserialization | B301 `pickle` (pickle/dill), B302 `marshal`, B506 `yaml_load` |
+| *Related (informational, never patched)* | B403 `import_pickle` |
+
+Every other Bandit rule is listed under `ignored_issues` and never given one of
+these categories. **B303–B306 are deliberately not mapped.** In Bandit they are
+`md5` (weak hashes), `ciphers`, `cipher_modes` (ECB) and `mktemp_q` (temporary
+files), none of which is deserialization. A test checks every mapped ID against
+the installed Bandit.
+
+Each finding includes:
+- a stable ID (a hash of path, rule, line and column)
+- category, severity (Bandit's level, lower-cased)
+- confidence: Bandit's LOW/MEDIUM/HIGH mapped to 0.3/0.6/0.9
+- project-relative path and line range
+- the Bandit description, plus a category explanation
+- a code snippet (at most 20 lines)
+- `AstContext`: the innermost enclosing function or class of at most 150 lines
+  (otherwise the innermost statement), its qualified name, the enclosing class,
+  and the module imports
+
+### Safety
+
+- **Read-only.** Files are only read as bytes. They are never written, imported,
+  compiled to bytecode or executed. Bandit and `ast.parse` only build syntax
+  trees. No subprocess is used.
+- **Stays inside the root.**
+  - Default generated directories are skipped: `.git`, `.venv`, `__pycache__`,
+    `.pytest_cache`, `node_modules`, `build`, `dist`, `*.egg-info` and similar.
+  - Symlinked directories are not followed.
+  - Symlinked files are skipped.
+  - Anything that resolves outside the root, including Windows junctions, is
+    refused.
+  - Bandit results for files that weren't selected for scanning are rejected.
+- **Secrets.**
+  - For credential findings, string literals on the flagged lines are replaced
+    with `"***REDACTED***"` in the snippet and context.
+  - Bandit's message, which quotes the secret, is shortened to its prefix.
+  - Error messages are length-limited and scrubbed of secret-looking
+    environment variable values and token formats.
+
+### CLI
+
+```powershell
+uv run autopatch scan benchmarks --output reports/findings.json
+uv run autopatch scan path\to\project --exclude tests --exclude "legacy/*"
+uv run autopatch scan path\to\project --fail-on-findings
+```
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Scan completed: zero findings, or findings without `--fail-on-findings` |
+| 1 | Scan completed with supported findings and `--fail-on-findings` was given |
+| 2 | Operational error: missing directory, Bandit missing or crashing, malformed results, or the report couldn't be written |
+
+The summary always prints `Supported findings: N`. A clean scan ends with
+`Result: no supported vulnerabilities found. The scan completed successfully.`,
+while failures print `ERROR: ...` to stderr and exit with 2. `--output` must be a
+`.json` file and can never overwrite a scanned source file.
+
+### Limitations
+
+- **Bandit's patterns only.**
+  - Detection is limited to what Bandit's syntax patterns catch. There is no
+    data-flow or taint analysis, so B608 flags string-built SQL whether or not
+    the input is attacker-controlled.
+  - Credential checks depend on Bandit's variable-name patterns, so a name
+    like `api_key = "..."` is **not** flagged.
+- **Confidence numbers** are fixed placeholders, not calibrated probabilities.
+- **Redaction is broad and partial.**
+  - It masks every string literal on the flagged lines, including harmless ones
+    like a username or URL.
+  - Credentials elsewhere in the file are not redacted.
+  - Because of the masking, `AstContext.source` for credential findings is not
+    the exact file text. The Patch Generator will need to read the original
+    span from disk.
+- **Unparseable files.** Files with syntax errors are reported as skipped. A
+  finding in a file that `ast` can't parse has no `ast_context`.
+- **`# nosec`.** Lines marked `# nosec` are respected unless `--ignore-nosec` is
+  given.
+- **Symlink tests.** On Windows without symlink privilege, the real symlink
+  tests are skipped. Junction and mocked tests cover the same protection.
+
 ## Benchmark
 
 `benchmarks/` holds a **small, hand-written seed set** of 9 intentionally
@@ -166,6 +272,8 @@ uv run pytest
 ```
 
 Tests need no Groq key and no network access, and never run benchmark samples.
+`tests/unit/` mocks Bandit where useful. `tests/integration/` runs the real
+Bandit on the benchmark fixtures and the CLI.
 
 ## Development status
 
@@ -173,7 +281,7 @@ Tests need no Groq key and no network access, and never run benchmark samples.
 |---|---|---|
 | M0 | Project scaffold, configuration, tests | Done |
 | M1 | Data models + seed benchmark | Done |
-| M2 | Scanner Agent | Not started |
+| M2 | Scanner Agent + `autopatch scan` CLI | Done |
 | M3 | Patch Generator Agent | Not started |
 | M4 | Verification Agent (Docker) | Not started |
 | M5 | Orchestrator, Documentation Agent, CLI | Not started |
