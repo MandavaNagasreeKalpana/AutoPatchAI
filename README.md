@@ -2,11 +2,13 @@
 
 **An AST-aware multi-agent framework for automated security vulnerability remediation in Python projects.**
 
-> **Status: early development (Milestone M2 complete).**
+> **Status: early development (Milestone M3A complete).**
 > Implemented so far: configuration, shared data models, a small seed benchmark,
-> and the **Scanner Agent** with its `autopatch scan` CLI. The Patch Generator,
-> Verification and Documentation agents, the orchestrator, the API and the UI
-> are not implemented yet. See [Development status](#development-status).
+> the **Scanner Agent** with its `autopatch scan` CLI, and a standalone **Groq
+> client** (`autopatch/llm/`). The Groq client is not connected to any agent yet.
+> The Patch Generator, Verification and Documentation agents, the orchestrator,
+> the API and the UI are not implemented yet. See
+> [Development status](#development-status).
 
 ## Overview
 
@@ -55,7 +57,7 @@ Streamlit UI ──HTTP──> FastAPI ──> Orchestrator
 | Data models / validation | Pydantic v2 | Yes |
 | Tests | pytest | Yes |
 | Static security analysis | Bandit (Python API) | Yes |
-| LLM | Groq API | Planned (M3) |
+| LLM | Groq API (official `groq` SDK) | Client only (M3A); not yet used by an agent |
 | Isolated verification | Docker | Planned (M4) |
 | Backend API | FastAPI | Planned (M6) |
 | User interface | Streamlit | Planned (M6) |
@@ -87,6 +89,8 @@ Copy-Item .env.example .env
 |---|---|---|---|
 | `GROQ_API_KEY` | *(unset)* | any | Only required when an LLM operation runs. Never printed or logged. |
 | `GROQ_MODEL` | *(unset)* | a Groq model ID | No model is hardcoded; required for LLM operations. |
+| `AUTOPATCH_LLM_TIMEOUT` | `60` | integer 1–600 (seconds) | Timeout for each Groq request. |
+| `AUTOPATCH_LLM_MAX_RETRIES` | `2` | integer 0–5 | Retries for transient Groq failures only. |
 | `AUTOPATCH_MAX_RETRIES` | `3` | integer 0–10 | Extra patch attempts after a failed verification. |
 | `AUTOPATCH_SANDBOX_IMAGE` | `autopatch-sandbox:latest` | image name, no spaces | Docker image for running tests. |
 | `AUTOPATCH_SANDBOX_TIMEOUT` | `120` | integer 1–3600 (seconds) | Per-run sandbox timeout. |
@@ -102,6 +106,104 @@ settings = load_settings()        # never makes a network request
 print(settings)                   # API key shown only as <set> / <not set>
 api_key, model = settings.require_llm()  # raises MissingLLMConfigError if unset
 ```
+
+## Groq LLM client (M3A)
+
+`autopatch/llm/` holds a small Groq chat-completion client. It is a standalone
+building block for the upcoming Patch Generator and is **not connected to the
+scanner or any agent yet**.
+
+### Local setup (your own key, never committed)
+
+1. Create a Groq account and an API key in your own Groq console.
+2. Create your **own local** `.env` file from the template. `.env` is
+   git-ignored and must never be committed.
+   ```powershell
+   Copy-Item .env.example .env
+   ```
+3. Open `.env` in your editor and set `GROQ_API_KEY` and `GROQ_MODEL` (a model
+   available to your account; for JSON output, one that supports JSON mode).
+   Don't paste the key anywhere else: not in code, docs, issues or chat.
+4. Check the configuration without printing the key:
+   ```powershell
+   uv run python -c "from autopatch.config import load_settings; print(load_settings())"
+   ```
+   The key is shown only as `<set>` or `<not set>`.
+
+### Usage
+
+```python
+from autopatch.llm import GroqClient
+
+client = GroqClient.from_env()  # reads .env; raises MissingLLMConfigError if unset
+reply = client.chat([{"role": "user", "content": "Say hello."}])
+print(reply.content, reply.usage.total_tokens)
+
+result = client.chat_json(
+    [{"role": "user", "content": "Return a JSON object with a 'status' field."}],
+    schema=MyPydanticModel,  # optional
+)
+print(result.data, result.parsed)
+```
+
+### Behaviour
+
+- **Configuration:**
+  - `GROQ_API_KEY` and `GROQ_MODEL` are required only when a client is created,
+    and nothing contacts Groq until you call `chat` or `chat_json`.
+  - The model always comes from `GROQ_MODEL`. The client **never switches
+    model or provider**.
+- **JSON mode:**
+  - `chat_json` sends `response_format={"type": "json_object"}`, and the prompt
+    must mention JSON.
+  - The reply must be one valid JSON object: no markdown fences, no NaN, no
+    duplicate keys. With `schema`, it is also validated.
+  - Invalid, empty or truncated output raises an error. It is never accepted
+    silently.
+  - If the model rejects JSON mode, `LLMUnsupportedFeatureError` says so and
+    nothing else is tried.
+- **Errors:** each failure raises its own exception class, listed in the table
+  below.
+- **Retries:**
+  - At most `AUTOPATCH_LLM_MAX_RETRIES` retries, with exponential backoff and
+    jitter (capped at 30 s).
+  - Rate-limit retries honour `Retry-After`.
+  - The SDK's own retries are disabled, so attempts are never doubled.
+- **Stops immediately when:** the server asks to wait more than 30 s, or the
+  error looks like an exhausted daily quota.
+- **No paid fallback.**
+- **Safety:**
+  - Error messages are length-limited and redacted: the configured key, secret
+    env values, token formats and `Authorization` headers are removed.
+  - The original SDK exception, which holds the request headers, is not
+    chained.
+  - **AutoPatch's own logger** (`autopatch.llm`) records only metadata: the
+    error type, HTTP status, retry wait and attempt number. It never logs
+    prompts, model responses, request headers or API keys.
+  - **The Groq SDK's own logging is separate.** When DEBUG logging is enabled
+    (for example `logging.basicConfig(level=logging.DEBUG)`, or the
+    environment variable `GROQ_LOG=debug`), the SDK's `groq._base_client`
+    logger writes request options, **including the prompt messages**. An
+    audit with DEBUG enabled found no API key or `Authorization` header in
+    those logs, but prompt content was present.
+  - Don't enable DEBUG or `GROQ_LOG=debug` when handling sensitive source code,
+    and keep the default logging level (INFO or higher) for real projects.
+    AutoPatch does not claim that every log is free of prompt content.
+  - Prompts over 60,000 characters are refused locally, so whole files or
+    repositories can't be sent by accident.
+
+| Exception | When | Retried? |
+|---|---|---|
+| `MissingLLMConfigError` | key or model not configured | – (raised before any request) |
+| `LLMAuthenticationError` | HTTP 401 / 403 | No |
+| `LLMRateLimitError` | HTTP 429 (`quota_exhausted=True` for daily limits) | Short waits only |
+| `LLMTimeoutError` | request timed out / HTTP 408 | Yes |
+| `LLMConnectionError` | network failure | Yes |
+| `LLMServerError` | HTTP 5xx | Yes |
+| `LLMInvalidRequestError` | HTTP 400/404/422, oversized or invalid prompt | No |
+| `LLMUnsupportedFeatureError` | model rejected JSON mode | No |
+| `LLMEmptyResponseError` / `LLMResponseError` | empty or malformed response | No |
+| `LLMStructuredOutputError` | invalid/truncated JSON, schema mismatch | No |
 
 ## Data models
 
@@ -272,6 +374,8 @@ uv run pytest
 ```
 
 Tests need no Groq key and no network access, and never run benchmark samples.
+The Groq tests use mocked responses (a fake SDK, or the real SDK over
+`httpx.MockTransport`). Real HTTP transport is blocked during those tests.
 `tests/unit/` mocks Bandit where useful. `tests/integration/` runs the real
 Bandit on the benchmark fixtures and the CLI.
 
@@ -282,7 +386,8 @@ Bandit on the benchmark fixtures and the CLI.
 | M0 | Project scaffold, configuration, tests | Done |
 | M1 | Data models + seed benchmark | Done |
 | M2 | Scanner Agent + `autopatch scan` CLI | Done |
-| M3 | Patch Generator Agent | Not started |
+| M3A | Groq client (standalone) | Done |
+| M3B | Patch Generator Agent | Not started |
 | M4 | Verification Agent (Docker) | Not started |
 | M5 | Orchestrator, Documentation Agent, CLI | Not started |
 | M6 | FastAPI backend + Streamlit UI | Not started |

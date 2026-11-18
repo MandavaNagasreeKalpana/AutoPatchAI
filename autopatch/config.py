@@ -29,6 +29,8 @@ ENV_MAX_RETRIES = "AUTOPATCH_MAX_RETRIES"
 ENV_SANDBOX_IMAGE = "AUTOPATCH_SANDBOX_IMAGE"
 ENV_SANDBOX_TIMEOUT = "AUTOPATCH_SANDBOX_TIMEOUT"
 ENV_ALLOW_HOST_EXEC = "AUTOPATCH_ALLOW_HOST_EXEC"
+ENV_LLM_TIMEOUT = "AUTOPATCH_LLM_TIMEOUT"
+ENV_LLM_MAX_RETRIES = "AUTOPATCH_LLM_MAX_RETRIES"
 
 DEFAULT_MAX_RETRIES = 3
 MIN_MAX_RETRIES = 0
@@ -39,6 +41,17 @@ DEFAULT_SANDBOX_IMAGE = "autopatch-sandbox:latest"
 DEFAULT_SANDBOX_TIMEOUT = 120  # seconds
 MIN_SANDBOX_TIMEOUT = 1
 MAX_SANDBOX_TIMEOUT = 3600
+
+# Groq request timeout and retries for *transient* API failures (rate limits,
+# timeouts, connection and 5xx errors). Separate from AUTOPATCH_MAX_RETRIES,
+# which bounds patch-refinement attempts.
+DEFAULT_LLM_TIMEOUT = 60  # seconds
+MIN_LLM_TIMEOUT = 1
+MAX_LLM_TIMEOUT = 600
+
+DEFAULT_LLM_MAX_RETRIES = 2
+MIN_LLM_MAX_RETRIES = 0
+MAX_LLM_MAX_RETRIES = 5
 
 DEFAULT_ENV_FILE = ".env"
 
@@ -64,6 +77,8 @@ class Settings:
     sandbox_image: str = DEFAULT_SANDBOX_IMAGE
     sandbox_timeout: int = DEFAULT_SANDBOX_TIMEOUT
     allow_host_exec: bool = False
+    llm_timeout: int = DEFAULT_LLM_TIMEOUT
+    llm_max_retries: int = DEFAULT_LLM_MAX_RETRIES
 
     @property
     def has_llm_credentials(self) -> bool:
@@ -103,6 +118,8 @@ class Settings:
             "sandbox_image": self.sandbox_image,
             "sandbox_timeout": self.sandbox_timeout,
             "allow_host_exec": self.allow_host_exec,
+            "llm_timeout": self.llm_timeout,
+            "llm_max_retries": self.llm_max_retries,
         }
 
     def __repr__(self) -> str:
@@ -147,6 +164,16 @@ def load_settings(
             MAX_SANDBOX_TIMEOUT,
         ),
         allow_host_exec=_parse_bool(values, ENV_ALLOW_HOST_EXEC, default=False),
+        llm_timeout=_parse_int(
+            values, ENV_LLM_TIMEOUT, DEFAULT_LLM_TIMEOUT, MIN_LLM_TIMEOUT, MAX_LLM_TIMEOUT
+        ),
+        llm_max_retries=_parse_int(
+            values,
+            ENV_LLM_MAX_RETRIES,
+            DEFAULT_LLM_MAX_RETRIES,
+            MIN_LLM_MAX_RETRIES,
+            MAX_LLM_MAX_RETRIES,
+        ),
     )
 
 

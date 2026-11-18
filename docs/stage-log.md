@@ -96,3 +96,39 @@ A record of each development stage: what was built, how it was verified, and wha
 **Open items**
 - `AstContext.source` is redacted for credential findings, so M3 must read the original span from disk to build `Patch.original_code`.
 - There is no data-flow analysis, and Bandit's credential name patterns miss names like `api_key`.
+
+## M3A (2026-11-18): Groq API integration (standalone client)
+
+**Goal:** a safe, tested Groq chat-completion client for the future Patch Generator. It is not connected to the scanner or any agent, and generates no patches.
+
+**Dependency added:** `groq>=1.0,<2`, the official SDK, locked at 1.7.0. It brings in httpx 0.28.1, anyio, distro and certifi, and is installed only in `.venv`.
+
+**Built**
+- `autopatch/config.py`: new `AUTOPATCH_LLM_TIMEOUT` (default 60, range 1–600 s) and `AUTOPATCH_LLM_MAX_RETRIES` (default 2, range 0–5), also shown in `safe_dict()`. Existing settings and behaviour are unchanged.
+- `autopatch/redaction.py`: one shared redaction helper, now used by both the scanner and the LLM integration. `scanner/errors.py` re-exports the same function objects (`redact_secrets`, `safe_error_message`, `REDACTED`), so existing scanner imports and call signatures still work.
+  - **Preserved:** all M2 redaction (secret-looking environment values, and Groq/OpenAI/AWS/GitHub token formats). `safe_error_message` output is identical for the same input.
+  - **Stricter:** `Authorization` header values are now also masked, including quoted dict/JSON forms such as `{'Authorization': 'Bearer …'}`. This applies to scanner error messages too, so scanner redaction changed in this one additive way: it masks more, never less. A side-by-side check of the M2 and M3A helpers on the same inputs matched in every case except the two `Authorization` examples.
+  - **New:** an `extra_secrets` parameter, so the LLM client can remove the configured key even when it came from `.env` rather than the process environment.
+- `autopatch/llm/`:
+  - `errors.py`: the `LLMError` hierarchy, each class with a `retryable` flag.
+  - `types.py`: `ChatMessage`, `ChatResult` (content, model, finish reason, token usage, attempts, latency) and `TokenUsage`, plus a 60,000-character prompt limit.
+  - `structured.py`: `parse_json_object` (strict: no fences, NaN or duplicate keys; the top level must be an object) and `validate_json`, which validates against a Pydantic schema and never echoes values in errors.
+  - `client.py`: `GroqClient` with `chat()` and `chat_json()`.
+    - The SDK's own retries are off (`max_retries=0`), and the wrapper owns a bounded retry loop.
+    - Retry-After is honoured, up to a 30 s maximum wait.
+    - Backoff is exponential with jitter.
+    - An exhausted daily quota stops at once.
+    - Errors are translated without chaining the SDK exception.
+    - AutoPatch's own `autopatch.llm` logger records only metadata. The Groq SDK's logger can write prompt messages when DEBUG or `GROQ_LOG=debug` is enabled (see the README).
+
+**Verified**
+- `uv run pytest`: 424 passed, 3 skipped (the 341 earlier tests plus 83 new ones). The 3 skips are the same Windows symlink-privilege tests as in M2.
+- All Groq tests are mocked. A fake SDK raises real `groq` exception objects, and the real `groq.Groq` runs over `httpx.MockTransport`. An autouse fixture makes the real `httpx.HTTPTransport` raise, and a test confirms the guard is active. No API key was needed, and no `.env` exists in the repository.
+- Secret checks on all changed and new files found no key patterns. The fake token in a test is assembled at runtime.
+
+**Open items**
+- No live Groq call has been made. Real-model behaviour still needs a manual check with your own key:
+  - which models support JSON mode
+  - the exact 429 and quota messages
+- Quota detection is heuristic, based on Groq's message text ("per day", TPD/RPD, "quota"). An unrecognised wording would be treated as an ordinary rate limit, so it is still bounded by retries and the 30 s wait limit.
+- There is no streaming, tool calling or async client, because they aren't needed yet.
