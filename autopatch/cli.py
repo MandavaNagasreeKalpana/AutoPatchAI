@@ -17,7 +17,7 @@ from pathlib import Path
 
 from autopatch.models import ScanResult
 from autopatch.scanner import ScannerAgent, ScannerError
-from autopatch.scanner.errors import safe_error_message
+from autopatch.scanner.errors import escape_for_terminal, safe_error_message
 
 EXIT_OK = 0
 EXIT_FINDINGS = 1
@@ -60,7 +60,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _err(message: str) -> None:
-    print(f"ERROR: {message}", file=sys.stderr)
+    print(f"ERROR: {escape_for_terminal(message)}", file=sys.stderr)
+
+
+def _show(text: object) -> str:
+    """Paths, reasons and messages can come from file names or Bandit
+    metadata: control characters are printed as visible escapes."""
+    return escape_for_terminal(str(text))
 
 
 def _check_output_path(output: Path, result: ScanResult) -> str | None:
@@ -81,9 +87,9 @@ def _check_output_path(output: Path, result: ScanResult) -> str | None:
 
 
 def _print_summary(result: ScanResult) -> None:
-    print(f"AutoPatch scan: {result.project_root}")
+    print(f"AutoPatch scan: {_show(result.project_root)}")
     print(
-        f"Bandit {result.scanner_version} | files scanned: {len(result.files_scanned)} | "
+        f"Bandit {_show(result.scanner_version)} | files scanned: {len(result.files_scanned)} | "
         f"skipped: {len(result.skipped_files)} | {result.duration_seconds:.2f}s"
     )
     print(f"Supported findings: {len(result.findings)}")
@@ -91,7 +97,7 @@ def _print_summary(result: ScanResult) -> None:
         print(f"  {category.value:<26}{count}")
     for finding in result.findings[:MAX_LISTED_FINDINGS]:
         print(
-            f"  - {finding.file_path}:{finding.line}  {finding.rule_id}  "
+            f"  - {_show(finding.file_path)}:{finding.line}  {_show(finding.rule_id)}  "
             f"{finding.severity.value:<8} {finding.category.value}"
         )
     if len(result.findings) > MAX_LISTED_FINDINGS:
@@ -108,7 +114,7 @@ def _print_summary(result: ScanResult) -> None:
         + (f"  [{', '.join(f'{k} x{v}' for k, v in sorted(ignored.items()))}]" if ignored else "")
     )
     for skipped in result.skipped_files:
-        print(f"  skipped: {skipped.file_path} ({skipped.reason})")
+        print(f"  skipped: {_show(skipped.file_path)} ({_show(skipped.reason)})")
     for error in result.errors:
         _err(error)
 
@@ -135,7 +141,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         except OSError as exc:
             _err(f"could not write report: {safe_error_message(exc)}")
             return EXIT_ERROR
-        print(f"Report written to {output}")
+        print(f"Report written to {_show(output)}")
 
     if not result.ok:
         print("Result: scan finished with errors (see above); results may be incomplete.")

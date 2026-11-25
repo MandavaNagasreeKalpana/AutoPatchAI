@@ -2,13 +2,13 @@
 
 **An AST-aware multi-agent framework for automated security vulnerability remediation in Python projects.**
 
-> **Status: early development (Milestone M3A complete).**
+> **Status: early development (Milestone M3B complete).**
 > Implemented so far: configuration, shared data models, a small seed benchmark,
-> the **Scanner Agent** with its `autopatch scan` CLI, and a standalone **Groq
-> client** (`autopatch/llm/`). The Groq client is not connected to any agent yet.
-> The Patch Generator, Verification and Documentation agents, the orchestrator,
-> the API and the UI are not implemented yet. See
-> [Development status](#development-status).
+> the **Scanner Agent** with its `autopatch scan` CLI, the **Groq client**
+> (`autopatch/llm/`), and the **Patch Generator Agent** (`autopatch/patch_generator/`),
+> which produces **unverified candidate patches only**. The Verification and
+> Documentation agents, the orchestrator, the API and the UI are not implemented
+> yet. See [Development status](#development-status).
 
 ## Overview
 
@@ -42,7 +42,7 @@ Streamlit UI ──HTTP──> FastAPI ──> Orchestrator
 | Agent | Responsibility | Status |
 |---|---|---|
 | Scanner | Run Bandit, map findings to categories, extract AST context | **Implemented (M2)** |
-| Patch Generator | Build prompts, call Groq, validate the returned patch | Not implemented |
+| Patch Generator | Build prompts, call Groq, validate the returned patch | **Implemented (M3B)**: unverified candidates only |
 | Verification | Syntax check, sandboxed tests, Bandit rescan | Not implemented |
 | Documentation | Explain the vulnerability, the patch and verification results | Not implemented |
 | Orchestrator | Coordinate agents and the retry loop | Not implemented |
@@ -57,7 +57,7 @@ Streamlit UI ──HTTP──> FastAPI ──> Orchestrator
 | Data models / validation | Pydantic v2 | Yes |
 | Tests | pytest | Yes |
 | Static security analysis | Bandit (Python API) | Yes |
-| LLM | Groq API (official `groq` SDK) | Client only (M3A); not yet used by an agent |
+| LLM | Groq API (official `groq` SDK) | Yes, used by the Patch Generator (M3B) |
 | Isolated verification | Docker | Planned (M4) |
 | Backend API | FastAPI | Planned (M6) |
 | User interface | Streamlit | Planned (M6) |
@@ -109,9 +109,8 @@ api_key, model = settings.require_llm()  # raises MissingLLMConfigError if unset
 
 ## Groq LLM client (M3A)
 
-`autopatch/llm/` holds a small Groq chat-completion client. It is a standalone
-building block for the upcoming Patch Generator and is **not connected to the
-scanner or any agent yet**.
+`autopatch/llm/` holds a small Groq chat-completion client. The Patch Generator
+(M3B) uses it. The scanner does not.
 
 ### Local setup (your own key, never committed)
 
@@ -205,6 +204,251 @@ print(result.data, result.parsed)
 | `LLMEmptyResponseError` / `LLMResponseError` | empty or malformed response | No |
 | `LLMStructuredOutputError` | invalid/truncated JSON, schema mismatch | No |
 
+## Code layout: one folder per agent
+
+Each agent's code lives only in its own folder, so it can be developed and
+debugged on its own. Code used by more than one agent lives outside them, and
+an agent never imports from another agent's folder.
+
+```
+autopatch/
+├─ scanner/           Agent 1: Scanner Agent (Bandit + AST)
+├─ patch_generator/   Agent 2: Patch Generator Agent (Groq)
+├─ verification/      Agent 3: Verification Agent (planned)
+├─ documentation/     Agent 4: Documentation Agent (planned)
+├─ common/            shared: source parsing (source.py), secret redaction (sensitive.py)
+├─ models/            shared data models (Finding, Patch, ScanResult, ...)
+├─ llm/               shared Groq client
+├─ config.py, redaction.py, benchmark.py, cli.py
+```
+
+Tests follow the same names: `tests/unit/test_scanner_*.py`,
+`tests/unit/test_patch_generator_*.py`, and
+`tests/integration/test_scanner_to_patch_generator_*.py` for the hand-off
+between the two agents.
+
+## Patch Generator Agent (M3B)
+
+> ⚠️ **Generated patches are UNVERIFIED candidates.** They are never applied to
+> your project, never written to disk, and never executed. A later Verification
+> Agent (M4) and a human reviewer must check every patch before it is used.
+
+```
+autopatch/patch_generator/
+├─ context.py  validate inputs; bounded, redacted, line-numbered source context
+├─ prompts.py  system rules + untrusted-data prompt with a random delimiter
+├─ secrets.py  finds hardcoded credential literals by rule (B105/B106/B107), AST only
+├─ schema.py   PatchProposal (LLM JSON contract), PatchCandidate (report-safe),
+│              PatchedSource (execution-only), PatchGeneration (the pair)
+├─ diff.py     strict single-file unified-diff parser; in-memory application
+├─ safety.py   AST-only checks: syntax, dangerous references, dependencies, category checks
+├─ agent.py    PatchGeneratorAgent: context -> prompt -> Groq -> diff -> checks -> Patch
+└─ errors.py   PatchGenerationError and its subclasses
+```
+
+### Usage
+
+```python
+from pathlib import Path
+from autopatch.config import load_settings
+from autopatch.patch_generator import PatchGeneratorAgent
+from autopatch.scanner import ScannerAgent
+
+scan = ScannerAgent().scan("path/to/project")
+finding = scan.findings[0]
+source = (Path(scan.project_root) / finding.file_path).read_text(encoding="utf-8")
+
+agent = PatchGeneratorAgent.from_settings(load_settings())  # reuses the M3A GroqClient
+result = agent.generate(finding, source)                     # nothing is written or run
+
+candidate = result.candidate          # REPORT-SAFE: may be serialized and stored
+print(candidate.patch.unified_diff)   # M1 Patch, status "generated" (redacted view)
+print(candidate.verified)             # always False at this stage
+
+holder = result.patched_source        # EXECUTION-ONLY: real patched file, in memory
+```
+
+The agent receives the finding and the file's text from the caller and never
+reads or writes files itself.
+
+**Two outputs, kept apart on purpose:**
+
+- **`result.candidate`** (`PatchCandidate`) is report-safe.
+  - It contains the M1 `Patch`, the validated proposal, warnings and token usage.
+  - For credential findings, the `Patch` code and diff show the **redacted** view
+    the model saw.
+  - It contains no real source, so `dataclasses.asdict`, `pickle` and Pydantic
+    serialization are safe. Its `repr` shows identifiers and status only.
+- **`result.patched_source`** (`PatchedSource`) holds the **real** patched file:
+  unchanged lines are restored, so it may include other real secrets from the
+  file.
+  - It is meant only for the in-memory hand-off to the Verification Agent (M4),
+    which will read it with `holder.reveal_for_verification()` and place it in
+    its isolated sandbox.
+  - It has no `__dict__`, cannot be changed, and its `repr` shows only the patch
+    ID, the file and a character count.
+  - Copying it, pickling it, or Pydantic serialization raises
+    `SourceSerializationError`.
+  - The whole `PatchGeneration` therefore also refuses `dataclasses.asdict` and
+    pickling. Only persist `result.candidate`.
+
+### How a candidate is produced
+
+1. **Context:**
+   - The finding and source are validated.
+   - A stale source is detected by comparing the finding's snippet with the file.
+   - The model sees only the finding's AST span (plus 3 lines on each side) and
+     the module's import header, with real line numbers. Nothing else in the
+     repository is sent.
+   - Context over 200 lines or 24,000 characters is **rejected, never truncated**.
+2. **Redaction before sending** (positions and line endings preserved; only
+   string literals and comments are ever rewritten, never identifiers):
+   - **Credential findings:** the actual credential literal is chosen by rule:
+     - B105: the value assigned to the secret-looking variable
+     - B106: the value of the secret-looking keyword argument
+     - B107: the default value of the secret-looking parameter
+
+     Ordinary values on the same line, such as `username="admin"` or a base
+     URL, stay visible.
+   - **Fallback:** only if the credential can't be identified is every literal
+     on the flagged lines masked. The candidate then carries a warning, and
+     removal of the credential is not checked locally.
+   - **Any category:**
+     - literals bound to secret-looking names (`password`, `token`, `api_key`,
+       …) anywhere in the file
+     - any other literal equal to a masked secret
+     - known token formats and secret environment values inside strings and
+       comments
+     - comments and docstrings that state a credential (`password: …`)
+   - **Fails closed:** if a credential finding has nothing to mask, or a masked
+     value still appears as a standalone value in the prompt, the request is
+     refused.
+3. **Prompt:**
+   - Source code, reviewer guidance **and all source-derived metadata** go inside
+     delimiters carrying a random per-request nonce. That metadata is the file
+     path, rule ID, enclosing scope and scanner description, each reduced to a
+     single line with control and line-separator characters removed and a
+     length limit.
+   - The nonce is regenerated if any of that text contains it.
+   - Outside the blocks are only the validated finding ID, the category enum and
+     line numbers.
+   - The model must copy the file path from the block into the diff headers.
+     Validation enforces the exact path.
+   - The system rules tell the model to ignore instructions in the code, fix
+     only this finding, keep unrelated behaviour, follow the category guidance
+     (parameterized SQL, environment-based secrets, safe deserialization), never
+     add `eval`/`exec`/shell calls, declare any new dependency, never claim the
+     patch is verified, and return JSON only.
+4. **Structured output:** the model must return a `PatchProposal`: finding ID,
+   category, vulnerability summary, rationale, unified diff, security
+   improvements, assumptions, limitations, new dependencies and a self-estimated
+   confidence. Unknown keys, a wrong finding or category, and empty or invalid
+   JSON are all rejected.
+5. **Diff validation (in memory):**
+   - It must be exactly one file, and the path must equal the finding's file.
+     Absolute paths, `..`, `/dev/null`, and create/delete/rename/mode/binary
+     changes are rejected.
+   - Hunk headers must be well formed and their line counts must match.
+   - Hunks must be ordered and non-overlapping.
+   - Empty and no-op diffs are rejected.
+   - Every hunk's context and removed lines must match the source exactly,
+     ignoring only trailing whitespace.
+   - **Tolerances** (deliberate):
+     - The hunk is looked for at its declared `-OLD_START` line, otherwise at the
+       nearest unique position within **20 lines**.
+     - `+NEW_START` is **not checked**.
+     - A bare empty line inside a hunk counts as an empty context line.
+     - The original end-of-file state is kept, so a file without a final newline
+       still has none.
+   - Only lines shown to the model may change.
+   - The redaction placeholder may not appear in added lines.
+6. **Static checks** (`ast.parse` only, never executed). These are defence in
+   depth, not proof of safety. Counts are compared before and after, so existing
+   code elsewhere in the file is not blamed on the patch.
+   - The patched file must be valid Python.
+   - **No new dangerous references.** These are references, not only calls, and
+     aliases count:
+     - `eval`, `exec`, `compile`, `__import__`, `__builtins__`,
+       `builtins.__dict__`
+     - `os.system`, `popen`, `startfile`, `exec*`, `spawn*`
+     - `subprocess.*`, `asyncio.create_subprocess_*`
+     - `importlib.import_module`, `runpy.*`
+     - pickle, dill, marshal and shelve loaders, and `yaml.load` with an unsafe
+       Loader
+     - `getattr` with a dangerous or computed attribute name
+     - `shell=True`
+     - star imports from dangerous modules
+   - New third-party imports must be declared in `new_dependencies`.
+   - **Credentials (any category):** no new hardcoded string bound to a
+     secret-looking variable, keyword argument or parameter default.
+   - **Credential findings:** the flagged credential value must be gone.
+   - **Deserialization findings:** the flagged unsafe call's count must drop.
+     Unrelated unsafe calls elsewhere in the file are not penalised.
+7. **Result:**
+   - A `PatchGeneration`: a report-safe `candidate` whose `Patch` has status
+     `generated` and a locally regenerated canonical diff, plus the
+     execution-only `patched_source`.
+   - Text where the model claims the patch is verified or guaranteed safe is
+     reported as a warning and ignored.
+
+**Errors** are subclasses of `PatchGenerationError`:
+- **Inputs:** `InvalidFindingError`, `InsufficientContextError`,
+  `SourceMismatchError`, `ContextTooLargeError`, `RedactionError`
+- **LLM:**
+  - `PatchLLMError` carries `llm_error`, `retryable`, `quota_exhausted` and
+    `status_code`. There is no fallback model or provider.
+  - `MalformedPatchResponseError`
+- **Diff:** `DiffFormatError`, `DiffPathError`, `MultiFileDiffError`,
+  `EmptyDiffError`, `NoOpDiffError`, `DiffHunkError`, `DiffApplyError`,
+  `DiffScopeError`
+- **Patched code:** `PatchSyntaxError`, `UnsafePatchError`
+
+Error messages contain no source code, raw model output or secrets, and no
+library exception is chained. Logs (`autopatch.patch_generator`) record only IDs, rule,
+line counts and error types.
+
+### Limitations
+
+- **Not checked yet:** the generator does not run tests or rescan with Bandit.
+  That is the Verification Agent's job (M4). A candidate can be syntactically
+  valid and still wrong.
+- **The dangerous-reference deny-list is defence in depth, not proof of safety.**
+  - It catches the common patterns and aliases above.
+  - Deeper dynamic tricks are not caught, for example
+    `globals()["ev" + "al"]`, `type(x).__subclasses__()`, `ctypes`, or code
+    hidden in a new helper module.
+  - Some safe code is also rejected (false positives):
+    - `getattr` with a computed name
+    - a new absolute import of a project-local module, which is treated as an
+      undeclared dependency
+    - a new keyword such as `secret_name="db/password"`, which is treated as a
+      hardcoded credential
+- **Category checks are partial.**
+  - A literal hidden in an expression, such as `os.getenv("X") or "fallback"`,
+    is not seen as a new hardcoded credential.
+  - SQL injection has no local category check; the M4 rescan must confirm that
+    fix.
+- **Redaction is heuristic.** It covers:
+  - rule-specific credential literals
+  - literals bound to secret-looking names
+  - known token formats and secret environment values in strings and comments
+  - comments and docstrings that state a credential (`password: …`)
+
+  An unusual secret elsewhere in the shown code, such as a free-form comment
+  without a keyword, could still be sent. Secrets shorter than 4 characters are
+  masked wherever they appear as a literal, but are not checked by substring
+  search.
+- **A real secret that also appears as an identifier or in the prompt text** (for
+  example a password equal to a function name) makes the leak check fail closed.
+- **Only lines shown to the model may change.** A fix that needs an import far
+  below a long module header (over 40 lines), or changes elsewhere in the file,
+  is rejected.
+- **`PatchedSource` refuses copying and pickling**, so it cannot be sent to
+  another process. M4 must use it in-process.
+- **Confidence** is the model's own estimate, not a measurement.
+- **No live check yet:** real model behaviour has not been tested against Groq.
+  All tests use mocked responses.
+
 ## Data models
 
 All agents exchange immutable, validated Pydantic models (`autopatch/models/`).
@@ -254,7 +498,7 @@ autopatch/scanner/
 ├─ file_discovery.py  find *.py files inside the root (skip generated dirs, exclusions, links leaving the root)
 ├─ bandit_runner.py   run Bandit in-process via its Python API; validate every result
 ├─ rule_mapping.py    the ONLY place Bandit rule IDs are mapped to categories
-├─ ast_context.py     ast.parse -> enclosing function/class span, imports, snippet, literal redaction
+├─ ast_context.py     ast.parse -> enclosing function/class span, imports, AST context
 ├─ scanner.py         ScannerAgent: discovery -> Bandit -> classify -> Finding models -> ScanResult
 └─ errors.py          ScannerError types + secret redaction for error messages
 ```
@@ -387,7 +631,7 @@ Bandit on the benchmark fixtures and the CLI.
 | M1 | Data models + seed benchmark | Done |
 | M2 | Scanner Agent + `autopatch scan` CLI | Done |
 | M3A | Groq client (standalone) | Done |
-| M3B | Patch Generator Agent | Not started |
+| M3B | Patch Generator Agent (unverified candidates) | Done |
 | M4 | Verification Agent (Docker) | Not started |
 | M5 | Orchestrator, Documentation Agent, CLI | Not started |
 | M6 | FastAPI backend + Streamlit UI | Not started |

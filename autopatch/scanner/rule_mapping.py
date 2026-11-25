@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
 
+from autopatch.common.sensitive import REDACT_LITERALS  # noqa: F401  (re-exported)
 from autopatch.models import VulnerabilityCategory
 
 _SQLI = VulnerabilityCategory.SQL_INJECTION
@@ -111,4 +112,3 @@ CATEGORY_EXPLANATIONS = MappingProxyType(
 )
 
 # Categories whose flagged lines may contain secret literals.
-REDACT_LITERALS = frozenset({_CREDS})

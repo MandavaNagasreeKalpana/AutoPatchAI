@@ -54,8 +54,10 @@ class DiscoveryResult:
 def resolve_root(root: str | os.PathLike[str]) -> Path:
     path = Path(root)
     try:
-        resolved = path.resolve(strict=True)
+        resolved: Path | None = path.resolve(strict=True)
     except (FileNotFoundError, OSError):
+        resolved = None
+    if resolved is None:  # raised outside the handler: no chained OSError
         raise ScanTargetError(f"project directory does not exist: {path}") from None
     if not resolved.is_dir():
         raise ScanTargetError(f"project path is not a directory: {path}")

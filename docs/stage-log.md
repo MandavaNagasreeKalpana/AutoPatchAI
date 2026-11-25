@@ -132,3 +132,105 @@ A record of each development stage: what was built, how it was verified, and wha
   - the exact 429 and quota messages
 - Quota detection is heuristic, based on Groq's message text ("per day", TPD/RPD, "quota"). An unrecognised wording would be treated as an ordinary rate limit, so it is still bounded by retries and the 30 s wait limit.
 - There is no streaming, tool calling or async client, because they aren't needed yet.
+
+## M3B (2026-11-19): Patch Generator Agent
+
+**Goal:** turn one validated scanner `Finding` plus the file's source text into one **unverified candidate patch**, using the M3A `GroqClient`. Patches are never applied, nothing is written to disk, and generated code is never executed.
+
+**Design decisions**
+- **No existing model changed.**
+  - A new `PatchProposal` model describes the LLM's JSON contract (summary, rationale, diff, improvements, assumptions, limitations, declared dependencies, self-estimated confidence). This is untrusted output that must be checked before building our own M1 `Patch`.
+  - A new `PatchCandidate` dataclass returns the `Patch` together with the proposal, warnings, token usage and the in-memory patched file.
+- **Report-safe vs real content.**
+  - The model sees a redacted, line-preserving view of the file.
+  - Diffs are matched against that view, and every unchanged line is copied from the real file.
+  - `Patch` (code, diff) holds the redacted view, so it is safe for reports. `PatchCandidate.proposed_source` held the real patched file in memory. *(Superseded by the audit fixes below: the real file now lives in the execution-only `PatchedSource`.)*
+- **No second Groq integration.** The agent accepts any client with `chat_json`. `from_settings()` builds the existing `GroqClient`.
+
+**Built (`autopatch/patcher/`)**
+- **`context.py`:**
+  - **Input checks:** invalid finding, missing source, unparseable source, missing AST span, finding beyond the end of the file, and a stale source (the snippet doesn't match).
+  - **Bounds:** the context is the import header plus the AST span ±3 lines. It may be at most 200 lines and 24,000 characters, and the whole file at most 500,000 characters. Anything larger is rejected, never truncated.
+  - **Redaction:** all literals on flagged credential lines, literals bound to secret-looking names, and token formats. If the flagged credential can't be masked, or a masked value survives, it fails closed.
+- **`prompts.py`:**
+  - System rules covering prompt injection, minimal changes, category-specific remediation, forbidden constructs, dependencies, no verification claims and JSON-only output.
+  - Untrusted source and guidance blocks delimited with a per-request random nonce, regenerated if the source contains it.
+  - Guidance is limited to 2,000 characters and redacted.
+- **`diff.py`:**
+  - A strict single-file unified-diff parser covering paths, hunk headers and counts, ordering, empty and no-op diffs, multiple files, and file-level operations.
+  - In-memory application with exact matching (trailing whitespace aside), a unique match within 20 lines of the declared position, and line-scope enforcement.
+- **`safety.py`:** `ast.parse`-only syntax check, an alias-aware deny-list of dangerous calls (counts may only stay the same or fall), and enforcement that new non-standard-library imports are declared.
+- **`agent.py`:** `PatchGeneratorAgent.generate()`.
+  - LLM errors are mapped to `PatchLLMError` (retryable and quota flags) and malformed output to `MalformedPatchResponseError`.
+  - These errors are raised outside the `except` block, so there is no `__context__`.
+  - `LLMStructuredOutputError.raw_content` is never copied.
+  - The canonical diff is regenerated with `difflib`, and `Patch.status` is always `generated`.
+- **`errors.py`:** 20 domain errors under `PatchGenerationError`.
+
+**Verified**
+- `uv run pytest -v`: 582 passed, 3 skipped (424 earlier tests plus 158 new ones). The 3 skips are the usual Windows symlink-privilege tests.
+- **New tests:**
+  - context: 25
+  - prompts: 28
+  - diff: 47
+  - safety: 19
+  - agent: 36
+  - benchmark integration: 3 (sqli-001, creds-001, deser-002, using real scanner findings and a mocked LLM)
+- **Mocked only:** every Groq interaction uses the real `GroqClient` with a fake SDK, and real httpx transport is blocked.
+- **Safety tests:**
+  - No file is opened for writing, and no rename, remove, temp-file or `os.system` call happens during generation.
+  - `exec` and `eval` are never called, and `compile` is only used AST-only.
+  - A patch containing a marker-writing `open(...)` is produced as text and never executed.
+- **Secrets:** they never appear in prompts, `Patch` JSON, reprs, logs or error messages, and the raw model output never appears in logs or errors.
+- **Scope:** no tracked M0–M3A file and no benchmark sample changed. `git diff --check` and `uv lock --check` passed, and there are no new dependencies.
+
+**Limitations and open items**
+- **Not verified:** candidates are not tested or rescanned (M4). A syntactically valid patch can still be functionally wrong or incomplete.
+- **Deny-list gaps:** indirect calls such as `getattr`, string-built names or new helper modules are not detected.
+- **Redaction is heuristic:** an unusual secret format elsewhere in the shown code could still be sent.
+- **Only shown lines can change:** this can reject legitimate fixes that need edits outside the shown context (for example an import below a module header longer than 40 lines).
+- **No live Groq run yet:** prompt quality, JSON-mode support and real diff accuracy still need testing with your own key.
+- **No refinement loop yet:** `generate()` accepts `guidance` and `attempt`, which the M5 orchestrator will use for retries.
+
+### M3B audit fixes (2026-11-19)
+
+An independent read-only audit returned **APPROVE AFTER SPECIFIC FIXES**. The fixes below are not yet committed.
+
+1. **[High] Credential over-redaction.**
+   - **Problem:** on a flagged credential line, every literal was treated as a secret and then replaced anywhere in the shown code, including inside identifiers. For B107 / creds-003, `"admin"` collided with the `admin_login` metadata, so generation always failed. In creds-002, the base URL was treated as a secret.
+   - **Fix:**
+     - A new `patcher/secrets.py` picks the credential literal by rule: B105 assigned value, B106 keyword value, B107 parameter default.
+     - All literals on the flagged lines are masked only as a fallback, which carries a warning.
+     - Masking works on AST nodes and on string and comment tokens only, using character offsets, so identifiers are never rewritten and line positions and endings are preserved.
+     - The leak check matches standalone values only, never parts of identifiers.
+     - Comments and docstrings that state a credential are hidden, and short secrets are masked wherever they appear as a literal.
+2. **[Medium] Real source exposed by serialization.**
+   - **Problem:** `PatchCandidate.proposed_source` was exposed by `asdict`, pickle, `TypeAdapter` and `vars`.
+   - **Fix:**
+     - `PatchCandidate` is now purely report-safe.
+     - The real file lives in the new `PatchedSource`: `__slots__`, immutable, a repr with counts only, and an explicit `reveal_for_verification()`. Copying, pickling and Pydantic serialization raise `SourceSerializationError`.
+     - `generate()` now returns `PatchGeneration(candidate, patched_source)`.
+3. **[Medium] Source-derived metadata outside the untrusted block.**
+   - **Problem:** the file path, scope, description and rule ID were placed outside the nonce-delimited block.
+   - **Fix:**
+     - They are now inside the block, each reduced to one line, with control characters and U+2028/2029/0085 removed and a length limit.
+     - The nonce-collision check covers the whole block.
+     - A path containing line separators is rejected.
+     - The diff rules refer to `<FILE>`, and validation still enforces the exact path.
+4. **[Medium] Deny-list bypasses and missing category checks.**
+   - **Fix:**
+     - The check now counts dangerous *references* with alias resolution: `f = eval`, `pickle.loads` held as a value, `__builtins__`, `builtins.__dict__`.
+     - It also covers star imports from dangerous modules, `getattr` with dangerous or computed names, `importlib.import_module`, `runpy.*`, `os.startfile`, and `asyncio.create_subprocess_*`.
+     - `yaml.load` with a safe Loader is no longer treated as dangerous.
+     - New category checks:
+       - no new hardcoded string bound to a secret-looking name, in any category
+       - credential findings must remove the flagged value
+       - deserialization findings must reduce the flagged unsafe call's count, without penalising unrelated calls
+5. **[Low] Smaller issues.**
+   - **End-of-file newline:** the original end-of-file state is now kept.
+   - **`repr(candidate)`:** shows identifiers and status only.
+   - **Documentation:** now states that `+NEW_START` is not checked, that hunks may match within 20 lines of their declared position, the deny-list and redaction limitations, and that `PatchedSource` must stay in the same process.
+
+**Verified:** `uv run pytest -v` gives 659 passed and 3 skipped. That is the 424 M0–M3A tests unchanged, plus 235 patcher tests (previously 158).
+- **Integration:** all 9 benchmark samples now patch successfully using real scanner findings. For creds-001/002/003, context building succeeds, no `fake-benchmark-*` value reaches the prompt, and ordinary identifiers and values stay visible.
+- **Checks:** `git diff --check` and `uv lock --check` passed. No dependencies were added, and no M0–M3A file or benchmark sample changed.
